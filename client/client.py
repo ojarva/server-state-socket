@@ -66,10 +66,9 @@ class StateClient(object):
                         server_received_at = float(received_data[2])
                         client_to_server = server_received_at - sent_at
                         server_to_client = reply_received_at - server_received_at
-                        if client_to_server < 0:
-                            self.logger.warning("client->server timestamp is <0: {client_to_server}".format(client_to_server=client_to_server))
-                        if server_to_client < 0:
-                            self.logger.warning("server->client timestamp is <0: {server_to_client}".format(server_to_client=server_to_client))
+                        if client_to_server < 0 or server_to_client < 0:
+                            self.logger.warning("client->server timestamp is {client_to_server} and server->client is {server_to_client}. Resetting to roundtrip times.".format(client_to_server=client_to_server, server_to_client=server_to_client))
+                            client_to_server = server_to_client = (reply_received_at - sent_at) / 2
 
                         if time.time() - self.last_sent_at > 10 and client_to_server > 0 and server_to_client > 0:
                             self.send_influx_values(client_to_server, server_to_client)
