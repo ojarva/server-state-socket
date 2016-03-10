@@ -62,6 +62,7 @@ class StateClient(object):
                             self.current_reconnect_time = 0.5
                             self.send_influx_state("connected")
                             self.has_connected = True
+                        self.send_status("running")
                         server_received_at = float(received_data[2])
                         client_to_server = server_received_at - sent_at
                         server_to_client = reply_received_at - server_received_at
@@ -73,7 +74,6 @@ class StateClient(object):
                         if time.time() - self.last_sent_at > 10 and client_to_server > 0 and server_to_client > 0:
                             self.send_influx_values(client_to_server, server_to_client)
                             self.logger.debug("Sent at {sent_at:.5f}, server received at {server_received_at:.5f}, finished at {reply_received_at:.5f}. Client->server: {client_to_server:.5f}. Server->client: {server_to_client:.5f}".format(sent_at=sent_at, server_received_at=server_received_at, reply_received_at=reply_received_at, client_to_server=client_to_server, server_to_client=server_to_client))
-                        self.send_status("running")
                 else:
                     self.logger.info("Received malformed reply: {reply}".format(reply=data))
             else:
@@ -142,7 +142,7 @@ def main(args):
     else:
         from local_settings import PORT, SERVER_IP
         ip, port = SERVER_IP, PORT
-    state_client = StateClient(SERVER_IP, PORT)
+    state_client = StateClient(ip, port)
     state_client.run()
 
 if __name__ == '__main__':
