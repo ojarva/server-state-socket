@@ -182,7 +182,7 @@ class StateClient(object):
         influx_data = [{
             "fields": {
                 "size_in_bytes": actual_size,
-                "speed_mbits": speed,
+                "speed_mbits": round(float(speed), 3),
             },
             "tags": {
                 "direction": direction,
