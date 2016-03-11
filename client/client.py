@@ -113,12 +113,12 @@ class StateClient(object):
                     except ValueError:
                         self.logger.info("Received malformed upload-completed from server: {data}".format(data=data))
                         return
-                    diff = receive_finished_at - receive_started_at
+                    diff = receive_finished_at - sent_at
                     if diff == 0:
                         self.logger.warn("Upload processed too quickly - no time information available.")
                         return
                     speed = received_bytes / diff / 1024 / 1024 * 8
-                    self.logger.info("Received upload reply: {diff} for {bytes} bytes. {speed}Mb/s".format(diff=diff, bytes=received_bytes, speed=speed))
+                    self.logger.info("Received upload reply: {diff}s for {bytes} bytes. {speed}Mb/s".format(diff=diff, bytes=received_bytes, speed=speed))
                     return
 
     def measure_download(self, soc, download_size):
@@ -151,8 +151,7 @@ class StateClient(object):
                     self.logger.debug("Received eof.")
                     break
             else:
-                receive_finished_at = time.time()
-                self.logger.info("Received {bytes} of data, when requesting {download_size} bytes.".format(bytes=received_bytes, download_size=download_size))
+                self.logger.info("No EOF received. Received {bytes} bytes of data, when requesting {download_size} bytes.".format(bytes=received_bytes, download_size=download_size))
                 return
         receive_finished_at = time.time()
         consumed_time = receive_finished_at - send_started_at
@@ -177,10 +176,10 @@ class StateClient(object):
         clock_diff = []
         server_diff = None
         while True:
-            ping_data = str(uuid.uuid4())
+            request_id = str(uuid.uuid4())
             sent_at = time.time()
-            s.send("ping {random_data} {timestamp:.5f}".format(random_data=ping_data, timestamp=sent_at))
-            self.logger.debug("Sent ping {random_data} {timestamp:.5f}".format(random_data=ping_data, timestamp=sent_at))
+            s.send("ping {request_id} {timestamp:.5f}".format(request_id=request_id, timestamp=sent_at))
+            self.logger.debug("Sent ping {request_id} at {timestamp:.5f}".format(request_id=request_id, timestamp=sent_at))
             ready = select.select([s], [], [], 5)
             if ready[0]:
                 data = s.recv(200)
@@ -193,7 +192,7 @@ class StateClient(object):
                 reply_received_at = time.time()
                 received_data = data.split(" ")
                 if len(received_data) == 3:
-                    if received_data[1] == ping_data:
+                    if received_data[1] == request_id:
                         if self.has_connected is False or self.has_connected is None:
                             self.current_reconnect_time = 0.5
                             self.send_influx_state("connected")
@@ -221,8 +220,10 @@ class StateClient(object):
 
                             self.send_influx_values(client_to_server, server_to_client)
                             self.logger.debug("Sent at {sent_at:.5f}, server received at {server_received_at:.5f}, finished at {reply_received_at:.5f}. Client->server: {client_to_server:.5f}. Server->client: {server_to_client:.5f}".format(sent_at=sent_at, server_received_at=server_received_at, reply_received_at=reply_received_at, client_to_server=client_to_server, server_to_client=server_to_client))
+                    else:
+                        self.logger.info("Received out-of-sync request id for ping.")
                 else:
-                    self.logger.info("Received malformed reply: {reply}".format(reply=data))
+                    self.logger.info("Ping received malformed reply: {reply}".format(reply=data))
             else:
                 self.logger.info("Received invalid reply: {reply}".format(reply=data))
             time.sleep(1)
