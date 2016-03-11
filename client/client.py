@@ -173,8 +173,8 @@ class StateClient(object):
             self.logger.info("Ping received malformed reply: {reply}".format(reply=data))
             return
 
-        if received_data[1] == request_id:
-            self.logger.info("Received out-of-sync request id for ping.")
+        if received_data[1] != request_id:
+            self.logger.info("Received out-of-sync request id for ping: expected '{request_id}' but got '{server_request_id}'.".format(request_id=request_id, server_request_id=received_data[1]))
             return
 
         if self.has_connected is False or self.has_connected is None:
