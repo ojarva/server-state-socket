@@ -32,6 +32,21 @@ class StateClient(object):
         "unknown": -1,
     }
 
+    DOWNLOAD_CONFIG = {
+        10 * 1024 * 1024: {
+            "interval": 3600,
+        },
+        5 * 1024 * 1024: {
+            "interval": 3600,
+        },
+        2 * 1024 * 1024: {
+            "interval": 900,
+        },
+        1 * 1024 * 1024: {
+            "interval": 900,
+        }
+    }
+
     def __init__(self, ip, port, **kwargs):
         self.ip = ip
         self.port = port
@@ -56,6 +71,7 @@ class StateClient(object):
         self.has_connected = None
         self.last_sent_at = 0
         self.current_reconnect_time = 0.5
+        self.bandwidth_times = {}
 
     def consume_and_discard(self, soc):
         while True:
@@ -92,10 +108,10 @@ class StateClient(object):
             if ready[0]:
                 data = soc.recv(300)
                 if data.lower().startswith("upload-failed "):
-                    self.logger.info("Upload failed.")
+                    self.logger.info("Upload failed due to server error.")
                     return
                 if data.lower().startswith("upload-completed "):
-                    self.logger.info("Upload completed.")
+                    self.logger.debug("Upload completed.")
                     received_data = data.split(" ")
                     if len(received_data) != 5:
                         self.logger.info("Received malformed upload-completed from server: {data}".format(data=data))
@@ -117,7 +133,11 @@ class StateClient(object):
                         return
                     speed = received_bytes / diff / 1024 / 1024 * 8
                     self.logger.info("Received upload reply: {diff}s for {bytes} bytes. {speed}Mb/s".format(diff=diff, bytes=received_bytes, speed=speed))
+                    self.add_bandwidth_to_influx("upload", upload_size, received_bytes, speed)
                     return
+            else:
+                self.logger.warning("Receiving reply to upload request timed out.")
+                return
 
     def measure_download(self, soc, download_size):
         request_id = str(uuid.uuid4())
@@ -156,14 +176,35 @@ class StateClient(object):
         speed = received_bytes / consumed_time * 8 / 1024 / 1024
         self.logger.info("Download received {bytes} bytes of data, when requesting {download_size} bytes. Spent {consumed_time}s -> {speed}Mb/s".format(bytes=received_bytes, download_size=download_size, consumed_time=consumed_time, speed=speed))
         self.consume_and_discard(soc)
+        self.add_bandwidth_to_influx("download", download_size, received_bytes, speed)
+
+    def add_bandwidth_to_influx(self, direction, size, actual_size, speed):
+        influx_data = [{
+            "fields": {
+                "size_in_bytes": actual_size,
+                "speed_mbits": speed,
+            },
+            "tags": {
+                "direction": direction,
+                "size": size,
+            },
+            "measurement": "internet_speed",
+            "time": datetime.datetime.utcnow().isoformat() + "Z",
+        }]
+        self.redis.publish("influx-update-pubsub", json.dumps(influx_data))
 
     def connect_and_transfer(self):
         soc = socket.create_connection((self.ip, self.port), 5)
         if self.password:
             soc.send("auth %s" % self.password)
         while True:
-            self.measure_download(soc, 1024 * 1024 * 5)
-            self.measure_upload(soc, 1024 * 1024 * 5)
+            for k in self.DOWNLOAD_CONFIG:
+                if time.time() - self.bandwidth_times.get(k, 0) > self.DOWNLOAD_CONFIG[k]["interval"]:
+                    self.measure_download(soc, k)
+                    self.measure_upload(soc, k)
+                    self.bandwidth_times[k] = time.time()
+                    time.sleep(5)
+            time.sleep(5)
         soc.close()
 
     def handle_pong(self, data, request_id, sent_at):
