@@ -17,11 +17,9 @@ import datetime
 import docopt
 import json
 import logging
-import multiprocessing
 import redis
 import select
 import socket
-import sys
 import time
 import uuid
 
@@ -107,7 +105,7 @@ class StateClient(object):
                         self.logger.warn("Received out-of-sync request ID from server.")
                         return
                     try:
-                        receive_started_at = float(received_data[2])
+                        # receive_started_at = float(received_data[2])  # not in use currently - no need to parse.
                         receive_finished_at = float(received_data[3])
                         received_bytes = int(received_data[4])
                     except ValueError:
@@ -156,7 +154,7 @@ class StateClient(object):
         receive_finished_at = time.time()
         consumed_time = receive_finished_at - send_started_at
         speed = received_bytes / consumed_time * 8 / 1024 / 1024
-        self.logger.info("Received {bytes} bytes of data, when requesting {download_size} bytes. Spent {consumed_time}s -> {speed}Mb/s".format(bytes=received_bytes, download_size=download_size, started_at=send_started_at, finished_at=receive_finished_at, consumed_time=consumed_time, speed=speed))
+        self.logger.info("Download received {bytes} bytes of data, when requesting {download_size} bytes. Spent {consumed_time}s -> {speed}Mb/s".format(bytes=received_bytes, download_size=download_size, consumed_time=consumed_time, speed=speed))
         self.consume_and_discard(soc)
 
     def connect_and_transfer(self):
@@ -168,66 +166,70 @@ class StateClient(object):
             self.measure_upload(soc, 1024 * 1024 * 5)
         soc.close()
 
+    def handle_pong(self, data, request_id, sent_at):
+        reply_received_at = time.time()
+        received_data = data.split(" ")
+        if len(received_data) != 3:
+            self.logger.info("Ping received malformed reply: {reply}".format(reply=data))
+            return
+
+        if received_data[1] == request_id:
+            self.logger.info("Received out-of-sync request id for ping.")
+            return
+
+        if self.has_connected is False or self.has_connected is None:
+            self.current_reconnect_time = 0.5
+            self.send_influx_state("connected")
+            self.has_connected = True
+
+        self.send_status("running")
+        server_received_at = float(received_data[2])
+        client_to_server = server_received_at - sent_at
+        server_to_client = reply_received_at - server_received_at
+        if client_to_server < 0 or server_to_client < 0:
+            self.logger.warning("client->server timestamp is {client_to_server} and server->client is {server_to_client}. Resetting to roundtrip times.".format(client_to_server=client_to_server, server_to_client=server_to_client))
+        if len(self.clock_diff) < 5:
+            self.clock_diff.append((sent_at, server_received_at, reply_received_at))
+        elif self.server_diff is None:
+            values = []
+            for sent_at_time, server_received_at_time, reply_received_at_time in self.clock_diff:
+                values.append((sent_at_time - server_received_at_time) + (reply_received_at_time - sent_at_time) / 2)
+            self.server_diff = float(sum(values)) / len(values)
+
+        if client_to_server < 0 or server_to_client < 0:
+            if self.server_diff is not None:
+                client_to_server += self.server_diff
+                server_to_client += self.server_diff
+        if time.time() - self.last_sent_at > 10 and client_to_server > 0 and server_to_client > 0:
+            self.send_influx_values(client_to_server, server_to_client)
+            self.logger.debug("Sent at {sent_at:.5f}, server received at {server_received_at:.5f}, finished at {reply_received_at:.5f}. Client->server: {client_to_server:.5f}. Server->client: {server_to_client:.5f}".format(sent_at=sent_at, server_received_at=server_received_at, reply_received_at=reply_received_at, client_to_server=client_to_server, server_to_client=server_to_client))
+
     def connect_and_ping(self):
-        s = socket.create_connection((self.ip, self.port), 5)
+        soc = socket.create_connection((self.ip, self.port), 5)
         self.send_influx_state("connected_before_reply")
         if self.password:
             soc.send("auth %s" % self.password)
-        clock_diff = []
-        server_diff = None
+        self.clock_diff = []
+        self.server_diff = None
         while True:
             request_id = str(uuid.uuid4())
             sent_at = time.time()
-            s.send("ping {request_id} {timestamp:.5f}".format(request_id=request_id, timestamp=sent_at))
+            soc.send("ping {request_id} {timestamp:.5f}".format(request_id=request_id, timestamp=sent_at))
             self.logger.debug("Sent ping {request_id} at {timestamp:.5f}".format(request_id=request_id, timestamp=sent_at))
-            ready = select.select([s], [], [], 5)
+            ready = select.select([soc], [], [], 5)
             if ready[0]:
-                data = s.recv(200)
+                data = soc.recv(200)
                 self.logger.debug("Received {data}".format(data=data))
             else:
                 self.logger.info("Connected, but no reply from server.")
-                s.close()
+                soc.close()
                 raise socket.error
             if data.lower().startswith("pong"):
-                reply_received_at = time.time()
-                received_data = data.split(" ")
-                if len(received_data) == 3:
-                    if received_data[1] == request_id:
-                        if self.has_connected is False or self.has_connected is None:
-                            self.current_reconnect_time = 0.5
-                            self.send_influx_state("connected")
-                            self.has_connected = True
-                        self.send_status("running")
-                        server_received_at = float(received_data[2])
-                        client_to_server = server_received_at - sent_at
-                        server_to_client = reply_received_at - server_received_at
-                        if client_to_server < 0 or server_to_client < 0:
-                            self.logger.warning("client->server timestamp is {client_to_server} and server->client is {server_to_client}. Resetting to roundtrip times.".format(client_to_server=client_to_server, server_to_client=server_to_client))
-                            trip_time = client_to_server = server_to_client = (reply_received_at - sent_at) / 2
-                        if len(clock_diff) < 5:
-                            clock_diff.append((sent_at, server_received_at, reply_received_at))
-                        elif server_diff is None:
-                            values = []
-                            for a1, a2, a3 in clock_diff:
-                                values.append((a1 - a2) + (a3 - a1) / 2)
-                            server_diff = float(sum(values)) / len(values)
-
-                        if client_to_server < 0 or server_to_client < 0:
-                            if server_diff is not None:
-                                client_to_server += server_diff
-                                server_to_client += server_diff
-                        if time.time() - self.last_sent_at > 10 and client_to_server > 0 and server_to_client > 0:
-
-                            self.send_influx_values(client_to_server, server_to_client)
-                            self.logger.debug("Sent at {sent_at:.5f}, server received at {server_received_at:.5f}, finished at {reply_received_at:.5f}. Client->server: {client_to_server:.5f}. Server->client: {server_to_client:.5f}".format(sent_at=sent_at, server_received_at=server_received_at, reply_received_at=reply_received_at, client_to_server=client_to_server, server_to_client=server_to_client))
-                    else:
-                        self.logger.info("Received out-of-sync request id for ping.")
-                else:
-                    self.logger.info("Ping received malformed reply: {reply}".format(reply=data))
+                self.handle_pong(data, request_id, sent_at)
             else:
                 self.logger.info("Received invalid reply: {reply}".format(reply=data))
             time.sleep(1)
-        s.close()
+        soc.close()
 
     def send_influx_values(self, client_to_server, server_to_client):
         client_to_server = round(client_to_server, 6)
@@ -301,7 +303,7 @@ class StateClient(object):
             self.run_speed()
 
 
-def main(args):
+def main():
     arguments = docopt.docopt(__doc__, version='1.0')
     if arguments.get("ping"):
         method = "ping"
@@ -313,4 +315,4 @@ def main(args):
     state_client.run()
 
 if __name__ == '__main__':
-    main(sys.argv[1:])
+    main()
