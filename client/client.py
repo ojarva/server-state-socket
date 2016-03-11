@@ -187,6 +187,7 @@ class StateClient(object):
             "tags": {
                 "direction": direction,
                 "size": size,
+                "source": "socket",
             },
             "measurement": "internet_speed",
             "time": datetime.datetime.utcnow().isoformat() + "Z",
